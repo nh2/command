@@ -3,7 +3,9 @@
 module System.Command
 ( command, command_, cmd
 , Stdout(..), Stderr(..), Exit(..)
-, CmdResult, CmdOption(..)
+, CmdResult
+, CmdOption(Cwd, Env, Stdin, Shell, BinaryPipes, Traced, WithStderr, EchoStdout, EchoStderr)
+, cmd', run
 ) where
 
 import Control.Arrow
@@ -12,6 +14,7 @@ import Control.DeepSeq
 import Control.Exception as C
 import Control.Monad
 import Data.Either
+import Data.String
 import Foreign.C.Error
 import System.Exit
 import System.IO
@@ -34,7 +37,28 @@ data CmdOption
     | WithStderr Bool -- ^ Should I include the @stderr@ in the exception if the command fails? Defaults to 'True'.
     | EchoStdout Bool -- ^ Should I echo the @stdout@? Defaults to 'True' unless a 'Stdout' result is required.
     | EchoStderr Bool -- ^ Should I echo the @stderr@? Defaults to 'True' unless a 'Stderr' result is required.
+    | CmdString String -- ^ A plain string argument (not exposed)
+    | CmdOptionList [CmdOption] -- ^ A combination of other CmdOptions (not exposed).
+                                -- Used only to build up one single CmdOption in the variadic `cmd` function.
+                                -- Invariant: The list is flat (contains no further CmdOptionList elements).
+                                -- (Note that this is not a Monoid because mappend mempty x /= x.)
       deriving (Eq,Ord,Show)
+
+
+instance IsString CmdOption where
+  fromString s = CmdString s
+
+
+cmdAppend :: CmdOption -> CmdOption -> CmdOption
+CmdOptionList a `cmdAppend` CmdOptionList b = CmdOptionList (a ++ b)
+x               `cmdAppend` CmdOptionList s = CmdOptionList (x:s)
+CmdOptionList s `cmdAppend` x               = CmdOptionList (s ++ [x]) -- slow, so don't use foldl
+x               `cmdAppend` y               = CmdOptionList [x, y]
+
+isOptionList :: CmdOption -> Bool
+isOptionList (CmdOptionList _) = True
+isOptionList _                 = False
+
 
 data Result
     = ResultStdout String
@@ -44,7 +68,9 @@ data Result
 
 
 commandExplicit :: String -> [CmdOption] -> [Result] -> String -> [String] -> IO [Result]
-commandExplicit funcName opts results exe args =
+commandExplicit funcName opts results exe args
+  | any isOptionList opts = error "cmd BUG: opts is not flat"
+  | otherwise =
 -- BEGIN COPIED
 -- Originally from readProcessWithExitCode with as few changes as possible
     mask $ \restore -> do
@@ -295,3 +321,29 @@ instance Arg String where arg = map Right . words
 instance Arg [String] where arg = map Right
 instance Arg CmdOption where arg = return . Left
 instance Arg [CmdOption] where arg = map Left
+
+
+
+class CmdArguments' t where
+    cmd' :: CmdOption -> t
+
+-- base case
+instance CmdArguments' CmdOption where
+    cmd' = id
+
+-- inductive case
+instance CmdArguments' r => CmdArguments' (CmdOption -> r) where
+    cmd' x = \y -> cmd' (x `cmdAppend` y) -- TODO might be quadratic
+
+
+run :: CmdResult r => CmdOption -> IO r
+run opt = case opt of
+    CmdOptionList cmds -> case partitionEithers (map separateOpts cmds) of
+        (opts, x:xs) -> let (a,b) = cmdResult in fmap b $ commandExplicit "cmd" opts a x xs
+        _ -> error "Error, no executable or arguments given to Development.Shake.cmd"
+    _                  -> run (CmdOptionList [opt]) -- single CmdOption
+  where
+    separateOpts x = case x of
+        CmdString s     -> Right s
+        CmdOptionList _ -> error "cmd BUG: cmds is not flat"
+        _               -> Left x
