@@ -1,28 +1,21 @@
 {-# LANGUAGE FlexibleInstances, TypeSynonymInstances, TypeOperators #-}
 
--- | /Deprecated:/ This module should no longer be imported as all the functions are available directly
---   from "Development.Shake". In future versions this module will be removed.
-module Development.Shake.Command(
-    command, command_, cmd,
-    Stdout(..), Stderr(..), Exit(..),
-    CmdResult, CmdOption(..),
-    ) where
+module System.Command
+( command, command_, cmd
+, Stdout(..), Stderr(..), Exit(..)
+, CmdResult, CmdOption(..)
+) where
 
 import Control.Arrow
 import Control.Concurrent
 import Control.DeepSeq
 import Control.Exception as C
 import Control.Monad
-import Control.Monad.IO.Class
 import Data.Either
 import Foreign.C.Error
 import System.Exit
 import System.IO
 import System.Process
-
-import Development.Shake.Core
-import Development.Shake.FilePath
-import Development.Shake.Types
 
 import GHC.IO.Exception (IOErrorType(..), IOException(..))
 
@@ -50,13 +43,13 @@ data Result
       deriving Eq
 
 
-commandExplicit :: String -> [CmdOption] -> [Result] -> String -> [String] -> Action [Result]
-commandExplicit funcName opts results exe args = verboser $ tracer $
+commandExplicit :: String -> [CmdOption] -> [Result] -> String -> [String] -> IO [Result]
+commandExplicit funcName opts results exe args =
 -- BEGIN COPIED
 -- Originally from readProcessWithExitCode with as few changes as possible
     mask $ \restore -> do
       ans <- try $ createProcess cp
-      (inh, outh, errh, pid) <- case ans of
+      (m'inh, m'outh, m'errh, pid) <- case ans of
           Right a -> return a
           Left err -> do
               let msg = "Development.Shake." ++ funcName ++ ", system command failed\n" ++
@@ -66,16 +59,16 @@ commandExplicit funcName opts results exe args = verboser $ tracer $
 
       let close = maybe (return ()) hClose
       flip onException
-        (do close inh; close outh; close errh
+        (do close m'inh; close m'outh; close m'errh
             terminateProcess pid; waitForProcess pid) $ restore $ do
 
         -- set pipes to binary if appropriate
         when (BinaryPipes `elem` opts) $ do
             let bin = maybe (return ()) (`hSetBinaryMode` True)
-            bin inh; bin outh; bin errh
+            bin m'inh; bin m'outh; bin m'errh
 
         -- fork off a thread to start consuming stdout
-        (out,waitOut,waitOutEcho) <- case outh of
+        (out,waitOut,waitOutEcho) <- case m'outh of
             Nothing -> return ("", return (), return ())
             Just outh -> do
                 out <- hGetContents outh
@@ -86,7 +79,7 @@ commandExplicit funcName opts results exe args = verboser $ tracer $
                 return (out,waitOut,waitOutEcho)
 
         -- fork off a thread to start consuming stderr
-        (err,waitErr,waitErrEcho) <- case errh of
+        (err,waitErr,waitErrEcho) <- case m'errh of
             Nothing -> return ("", return (), return ())
             Just errh -> do
                 err <- hGetContents errh
@@ -98,7 +91,7 @@ commandExplicit funcName opts results exe args = verboser $ tracer $
 
         -- now write and flush any input
         let writeInput = do
-              case inh of
+              case m'inh of
                   Nothing -> return ()
                   Just inh -> do
                       hPutStr inh input
@@ -118,8 +111,8 @@ commandExplicit funcName opts results exe args = verboser $ tracer $
         waitOutEcho
         waitErrEcho
 
-        close outh
-        close errh
+        close m'outh
+        close m'errh
 
         -- wait on the process
         ex <- waitForProcess pid
@@ -140,14 +133,6 @@ commandExplicit funcName opts results exe args = verboser $ tracer $
             ResultCode   _ -> ResultCode ex
     where
         input = last $ "" : [x | Stdin x <- opts]
-        verboser act = do
-            v <- getVerbosity
-            putLoud $ saneCommandForUser exe args
-            (if v >= Loud then quietly else id) act
-        tracer = case reverse [x | Traced x <- opts] of
-            "":_ -> liftIO
-            msg:_ -> traced msg
-            [] -> traced (takeFileName exe)
 
         -- what should I do with these handles
         binary = BinaryPipes `elem` opts
@@ -180,7 +165,7 @@ forkWait a = do
 -- Like System.Process, but tweaked to show less escaping,
 -- Relies on relatively detailed internals of showCommandForUser.
 saneCommandForUser :: FilePath -> [String] -> String
-saneCommandForUser cmd args = unwords $ map f $ cmd:args
+saneCommandForUser c args = unwords $ map f $ c:args
     where
         f x = if take (length y - 2) (drop 1 y) == x then x else y
             where y = showCommandForUser x []
@@ -224,14 +209,14 @@ instance CmdResult () where
     cmdResult = ([], \[] -> ())
 
 instance (CmdResult x1, CmdResult x2) => CmdResult (x1,x2) where
-    cmdResult = (a1++a2, \rs -> let (r1,r2) = splitAt (length a2) rs in (b1 r1, b2 r2))
+    cmdResult = (a1++a2, \rs -> let (r1,r2) = splitAt (length a1) rs in (b1 r1, b2 r2))
         where (a1,b1) = cmdResult
               (a2,b2) = cmdResult
 
-cmdResultWith f = second (f .) cmdResult
-
 instance (CmdResult x1, CmdResult x2, CmdResult x3) => CmdResult (x1,x2,x3) where
     cmdResult = cmdResultWith $ \(a,(b,c)) -> (a,b,c)
+      where
+        cmdResultWith f = second (f .) cmdResult
 
 
 -- | Execute a system command. Before running 'command' make sure you 'Development.Shake.need' any files
@@ -256,13 +241,13 @@ instance (CmdResult x1, CmdResult x2, CmdResult x3) => CmdResult (x1,x2,x3) wher
 --
 --   If you use 'command' inside a @do@ block and do not use the result, you may get a compile-time error about being
 --   unable to deduce 'CmdResult'. To avoid this error, use 'command_'.
-command :: CmdResult r => [CmdOption] -> String -> [String] -> Action r
+command :: CmdResult r => [CmdOption] -> String -> [String] -> IO r
 command opts x xs = fmap b $ commandExplicit "command" opts a x xs
     where (a,b) = cmdResult
 
 -- | A version of 'command' where you do not require any results, used to avoid errors about being unable
 --   to deduce 'CmdResult'.
-command_ :: [CmdOption] -> String -> [String] -> Action ()
+command_ :: [CmdOption] -> String -> [String] -> IO ()
 command_ opts x xs = commandExplicit "command_" opts [] x xs >> return ()
 
 
@@ -287,21 +272,21 @@ type a :-> t = a
 -- 'Exit' c <- 'cmd' \"gcc -c\" [myfile]                              -- run a command, recording the exit code
 -- ('Exit' c, 'Stderr' err) <- 'cmd' \"gcc -c myfile.c\"                -- run a command, recording the exit code and error output
 -- 'Stdout' out <- 'cmd' \"gcc -MM myfile.c\"                         -- run a command, recording the output
--- 'cmd' ('Cwd' \"generated\") \"gcc -c\" [myfile] :: 'Action' ()         -- run a command in a directory
+-- 'cmd' ('Cwd' \"generated\") \"gcc -c\" [myfile] :: 'IO' ()         -- run a command in a directory
 -- @
 --
 --   When passing file arguments we use @[myfile]@ so that if the @myfile@ variable contains spaces they are properly escaped.
 --
 --   If you use 'cmd' inside a @do@ block and do not use the result, you may get a compile-time error about being
 --   unable to deduce 'CmdResult'. To avoid this error, bind the result to @()@, or include a type signature.
-cmd :: CmdArguments args => args :-> Action r
+cmd :: CmdArguments args => args :-> IO r
 cmd = cmdArguments []
 
 class CmdArguments t where cmdArguments :: [Either CmdOption String] -> t
 instance (Arg a, CmdArguments r) => CmdArguments (a -> r) where
     cmdArguments xs x = cmdArguments $ xs ++ arg x
-instance CmdResult r => CmdArguments (Action r) where
-    cmdArguments x = case partitionEithers x of
+instance CmdResult r => CmdArguments (IO r) where
+    cmdArguments exs = case partitionEithers exs of
         (opts, x:xs) -> let (a,b) = cmdResult in fmap b $ commandExplicit "cmd" opts a x xs
         _ -> error "Error, no executable or arguments given to Development.Shake.cmd"
 
