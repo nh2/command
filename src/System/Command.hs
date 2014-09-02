@@ -52,7 +52,7 @@ commandExplicit funcName opts results exe args =
       (m'inh, m'outh, m'errh, pid) <- case ans of
           Right a -> return a
           Left err -> do
-              let msg = "Development.Shake." ++ funcName ++ ", system command failed\n" ++
+              let msg = "System.Command." ++ funcName ++ ", system command failed\n" ++
                         "Command: " ++ saneCommandForUser exe args ++ "\n" ++
                         show (err :: SomeException)
               error msg
@@ -119,7 +119,7 @@ commandExplicit funcName opts results exe args =
 -- END COPIED
 
         when (ResultCode ExitSuccess `notElem` results && ex /= ExitSuccess) $ do
-            let msg = "Development.Shake." ++ funcName ++ ", system command failed\n" ++
+            let msg = "System.Command." ++ funcName ++ ", system command failed\n" ++
                       "Command: " ++ saneCommandForUser exe args ++ "\n" ++
                       "Exit code: " ++ show (case ex of ExitFailure i -> i; _ -> 0) ++ "\n" ++
                       (if not stderrThrow then "Stderr not captured because ErrorsWithoutStderr was used"
@@ -219,7 +219,7 @@ instance (CmdResult x1, CmdResult x2, CmdResult x3) => CmdResult (x1,x2,x3) wher
         cmdResultWith f = second (f .) cmdResult
 
 
--- | Execute a system command. Before running 'command' make sure you 'Development.Shake.need' any files
+-- | Execute a system command. Before running 'command' make sure you 'System.Command.need' any files
 --   that are required by the command.
 --
 --   This function takes a list of options (often just @[]@, see 'CmdOption' for the available
@@ -288,7 +288,7 @@ instance (Arg a, CmdArguments r) => CmdArguments (a -> r) where
 instance CmdResult r => CmdArguments (IO r) where
     cmdArguments exs = case partitionEithers exs of
         (opts, x:xs) -> let (a,b) = cmdResult in fmap b $ commandExplicit "cmd" opts a x xs
-        _ -> error "Error, no executable or arguments given to Development.Shake.cmd"
+        _ -> error "Error, no executable or arguments given to System.Command.cmd"
 
 class Arg a where arg :: a -> [Either CmdOption String]
 instance Arg String where arg = map Right . words
